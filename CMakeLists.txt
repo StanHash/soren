@@ -13,8 +13,15 @@ set(SOURCES
     "core/types.h"
     "core/offset-map.h"
 
-    "core/por-bytecode.h"
-    "core/por-bytecode.cpp"
+    "core/soren-bytecode.h"
+    "core/soren-bytecode.cpp"
+    "core/soren-cmb.h"
+
+    "ast/expr.h"
+    "ast/stmt.h"
+
+    "decode/decode.h"
+    "decode/read-cmb.cpp"
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES})

@@ -6,41 +6,17 @@
 #include <stdexcept>
 #include <memory>
 
-#include "core/por-bytecode.h"
 #include "core/offset-map.h"
 
+#include "core/soren-bytecode.h"
+#include "core/soren-cmb.h"
+
+#include "ast/expr.h"
+#include "ast/stmt.h"
+
+#include "decode/decode.h"
+
 namespace soren {
-
-struct SceneInfo
-{
-	unsigned idx;
-
-	std::string name;
-	unsigned kind;
-
-	std::vector<int> parameters;
-
-	unsigned argCnt;
-	std::vector<std::string> varnames;
-
-	bool isGlobal : 1;
-};
-
-struct ScriptInfo
-{
-	const char* get_cstr(unsigned offset) const
-	{
-		if (offset >= strpool.size())
-			throw std::runtime_error("Bad string pool offset");
-
-		return strpool.data() + offset;
-	}
-
-	std::vector<SceneInfo> scenes;
-	std::vector<char> strpool;
-
-	std::vector<std::string> globalnames; // TODO: maybe
-};
 
 static
 std::vector<byte_type> read_entire_file(const char* filename)
@@ -59,153 +35,20 @@ std::vector<byte_type> read_entire_file(const char* filename)
 	return result;
 }
 
-template<typename IteratorType, typename ResultType = std::uint32_t>
-ResultType decode_int_le(IteratorType begin, IteratorType end)
-{
-	static_assert(std::is_convertible<typename std::iterator_traits<IteratorType>::value_type, byte_type>::value, "decode_le: expected byte (u8) iterators");
-
-	ResultType result = 0;
-	unsigned i = 0;
-
-	while (begin != end)
-		result = result + (*begin++ << (8*i++));
-
-	return result;
-}
-
-template<typename IteratorType, typename ResultType = std::uint32_t>
-ResultType decode_int_be(IteratorType begin, IteratorType end)
-{
-	static_assert(std::is_convertible<typename std::iterator_traits<IteratorType>::value_type, byte_type>::value, "decode_le: expected byte (u8) iterators");
-
-	ResultType result = 0;
-
-	while (begin != end)
-		result = *begin++ + (result << 8);
-
-	return result;
-}
-
-template<typename ResultType = std::uint32_t>
-ResultType decode_int_le(Span<const byte_type> span)
-{
-	return decode_int_le<decltype(span.begin()), ResultType>(span.begin(), span.end());
-}
-
-template<typename ResultType = std::uint32_t>
-ResultType decode_int_be(Span<const byte_type> span)
-{
-	return decode_int_be<decltype(span.begin()), ResultType>(span.begin(), span.end());
-}
-
-template<typename IntType = std::int32_t>
-IntType sign_extend(IntType value, unsigned bits)
-{
-	static_assert(std::is_signed<IntType>::value, "Result of sign_extend should be signed");
-
-	const auto rbits = (sizeof(IntType)*8 - bits);
-
-	return (value << rbits) >> rbits;
-}
-
-struct DisEvent
-{
-	std::wstring name;
-};
-
-using DisIns = BcIns<unsigned>;
-
-template<bool IsFE10 = true>
-std::vector<DisIns> decode_script(Span<const byte_type> bytes)
-{
-	std::vector<DisIns> result;
-
-	unsigned i = 0, lastJump = 0;
-	bool ended = false;
-
-	while (!ended && i < bytes.size())
-	{
-		DisIns ins { i, 0, 0 };
-		ins.opcode = bytes[i++];
-
-		if (!ins.valid<IsFE10>())
-		{
-			if (ins.valid<true>())
-				throw std::runtime_error("Invalid FE9 opcode (only valid in FE10)."); // TODO: better error
-
-			throw std::runtime_error("Invalid opcode."); // TODO: better error
-		}
-
-		if (ins.info().operandSize > 0)
-		{
-			if (i + ins.info().operandSize >= bytes.size())
-				throw std::runtime_error("Reached end of script when expecting operand."); // TODO: better error
-
-			ins.operand = decode_int_be(
-				bytes.begin() + i,
-				bytes.begin() + i + ins.info().operandSize);
-
-			ins.operand = sign_extend(ins.operand, ins.info().operandSize*8);
-
-			i += ins.info().operandSize;
-
-			if (IsFE10 && (ins.opcode == BC_OPCODE_CALL))
-			{
-				// in FE10, call(37) has a variable length operand
-				// if the first byte of the operand is >= 0x80
-				// the operand will be 2 bytes be, with the top bit removed
-
-				if (ins.operand & 0x80)
-					ins.operand = ((ins.operand & 0x7F) << 8) + bytes[i++];
-			}
-		}
-
-		switch (ins.opcode)
-		{
-
-		case BC_OPCODE_B:
-		case BC_OPCODE_BY:
-		case BC_OPCODE_BKY:
-		case BC_OPCODE_BN:
-		case BC_OPCODE_BKN:
-			ins.operand = i + ins.operand - ins.info().operandSize;
-			lastJump = std::max(lastJump, (unsigned) ins.operand);
-
-			break;
-
-		case BC_OPCODE_RETURN:
-		case BC_OPCODE_RETN:
-		case BC_OPCODE_RETY:
-			if (i > lastJump)
-				ended = true;
-
-			break;
-
-		} // switch (ins.opcode)
-
-		result.push_back(ins);
-	}
-
-	return result;
-}
-
 template<bool IgnoreBranchAndKeeps = true>
-OffsetMap<Span<const DisIns>> slice_script(Span<const DisIns> script)
+OffsetMap<Span<const BcIns>> slice_script(Span<const BcIns> script)
 {
-	OffsetMap<Span<const DisIns>> result;
+	OffsetMap<Span<const BcIns>> result;
 	std::set<std::size_t> slicePoints;
 
 	// Step 1: Find slice points
 
 	for (auto& ins : script)
 	{
-		if (IgnoreBranchAndKeeps)
-		{
-			if (ins.opcode == BC_OPCODE_BKN || ins.opcode == BC_OPCODE_BKY)
-				continue;
-		}
+		if (IgnoreBranchAndKeeps && ins.is_jump_keep())
+			continue;
 
-		if (ins.info().isJump)
+		if (ins.is_jump())
 		{
 			// jumps generate:
 			// a slice after themselves
@@ -216,7 +59,7 @@ OffsetMap<Span<const DisIns>> slice_script(Span<const DisIns> script)
 			slicePoints.insert(ins.operand);
 		}
 
-		if (ins.opcode == BC_OPCODE_RETURN)
+		if (ins.is_end())
 		{
 			// ends generate slices after themselves
 			slicePoints.insert(ins.location + 1);
@@ -252,7 +95,7 @@ OffsetMap<Span<const DisIns>> slice_script(Span<const DisIns> script)
 	return result;
 }
 
-Span<DisIns> convert_bks_to_fake_logic(Span<DisIns> slice)
+Span<BcIns> convert_bks_to_fake_logic(Span<BcIns> slice)
 {
 	// Converts bky/bkn chains to fake land/lorr instructions and reorder accordingly
 	// ex:
@@ -280,6 +123,8 @@ Span<DisIns> convert_bks_to_fake_logic(Span<DisIns> slice)
 		case BC_OPCODE_BKN:
 		case BC_OPCODE_BKY:
 		{
+			// Move the bkn/bky to just before the jump target, and replace it with a fake and/or
+
 			unsigned target = slice[i++].operand;
 			unsigned j = i;
 
@@ -302,228 +147,15 @@ Span<DisIns> convert_bks_to_fake_logic(Span<DisIns> slice)
 	return slice;
 }
 
-std::vector<DisIns> get_bks_as_fake_logic(Span<const DisIns> slice)
+std::vector<BcIns> get_bks_as_fake_logic(Span<const BcIns> slice)
 {
-	std::vector<DisIns> result(slice.begin(), slice.end());
+	std::vector<BcIns> result(slice.begin(), slice.end());
 	convert_bks_to_fake_logic(result);
 
 	return result;
 }
 
-struct Expr
-{
-	enum class Kind
-	{
-		// No children
-		IntLiteral,
-		StrLiteral,
-		Named,
-
-		// One child (unary operators)
-		Neg,
-		Not,
-		BitwiseNot,
-		Deref, // value-at-address ([])
-		Addrof, // address-of-value (&)
-
-		// Two child (binary operators)
-		Assign,
-		Add,
-		Sub,
-		Mul,
-		Div,
-		Mod,
-		Or,
-		And,
-		Xor,
-		Lsl,
-		Lsr,
-		Eq,
-		Ne,
-		Lt, // Maybe
-		Le,
-		Gt, // Maybe
-		Ge, // Maybe
-		EqStr,
-		NeStr,
-		LogicalAnd,
-		LogicalOr,
-
-		Func, // Name + Variable Children
-
-		Invalid,
-	};
-
-	Kind kind { Kind::Invalid };
-
-	// TODO: embed expression source location? (either bytecode offset or file:line:col)
-	// TODO (C++17): use std::variant
-
-	// Literal
-	std::int32_t literal {};
-
-	// Named/String/FnName
-	std::string named;
-
-	std::vector<std::unique_ptr<Expr>> children;
-
-	static inline
-	std::unique_ptr<Expr> make_unique_intlit(std::int32_t value)
-	{
-		std::unique_ptr<Expr> result = std::make_unique<Expr>();
-
-		result->kind = Kind::IntLiteral;
-		result->literal = value;
-
-		return result;
-	}
-
-	static inline
-	std::unique_ptr<Expr> make_unique_strlit(std::string&& value)
-	{
-		std::unique_ptr<Expr> result = std::make_unique<Expr>();
-
-		result->kind = Kind::StrLiteral;
-		result->named = std::move(value);
-
-		return result;
-	}
-
-	static inline
-	std::unique_ptr<Expr> make_unique_identifier(std::string&& value)
-	{
-		std::unique_ptr<Expr> result = std::make_unique<Expr>();
-
-		result->kind = Kind::Named;
-		result->named = std::move(value);
-
-		return result;
-	}
-
-	static inline
-	std::unique_ptr<Expr> make_unique_unop(Kind kind, std::unique_ptr<Expr>&& inner)
-	{
-		std::unique_ptr<Expr> result = std::make_unique<Expr>();
-
-		result->kind = kind;
-		result->children.push_back(std::move(inner));
-
-		return result;
-	}
-
-	static inline
-	std::unique_ptr<Expr> make_unique_binop(Kind kind, std::unique_ptr<Expr>&& lexpr, std::unique_ptr<Expr>&& rexpr)
-	{
-		std::unique_ptr<Expr> result = std::make_unique<Expr>();
-
-		result->kind = kind;
-		result->children.push_back(std::move(lexpr));
-		result->children.push_back(std::move(rexpr));
-
-		return result;
-	}
-
-	static inline
-	std::unique_ptr<Expr> make_unique_copy(const Expr& expr)
-	{
-		std::unique_ptr<Expr> result = std::make_unique<Expr>();
-
-		result->kind = expr.kind;
-		result->literal = expr.literal;
-		result->named = expr.named;
-
-		for (auto& child : expr.children)
-			result->children.push_back(make_unique_copy(*child));
-
-		return result;
-	}
-
-};
-
-struct Stmt
-{
-	enum class Kind
-	{
-		Push, // One child expr
-		Expr, // One child expr
-		Goto, // One child constant expr
-		GotoIf, // Two child exprs (first constant)
-		Yield, // No children
-		Return, // One child expr
-	};
-
-	Kind kind;
-
-	std::string label; //< TODO: better
-
-	std::vector<std::unique_ptr<Expr>> children;
-
-	static inline
-	Stmt make_push(std::unique_ptr<Expr>&& inner)
-	{
-		Stmt result { Kind::Push, {}, {} };
-
-		result.children.push_back(std::move(inner));
-
-		return result;
-	}
-
-	static inline
-	Stmt make_goto(std::int32_t target)
-	{
-		Stmt result { Kind::Goto, {}, {} };
-
-		// FIXME: use (or "register") actual label names instead of generating some on the fly
-
-		result.children.push_back(Expr::make_unique_identifier([&] ()
-		{
-			std::string name;
-			name.append("label_");
-			name.append(std::to_string(target));
-			return name;
-		} ()));
-
-		return result;
-	}
-
-	static inline
-	Stmt make_goto_if(std::int32_t target, std::unique_ptr<Expr>&& truth)
-	{
-		Stmt result { Kind::GotoIf, {}, {} };
-
-		// FIXME: do not copy-paste this and reuse same code as in make_goto
-
-		result.children.push_back(Expr::make_unique_identifier([&] ()
-		{
-			std::string name;
-			name.append("label_");
-			name.append(std::to_string(target));
-			return name;
-		} ()));
-
-		result.children.push_back(std::move(truth));
-
-		return result;
-	}
-
-	static inline
-	Stmt make_yield(void)
-	{
-		return Stmt { Kind::Yield, {}, {} };
-	}
-
-	static inline
-	Stmt make_return(std::unique_ptr<Expr>&& inner)
-	{
-		Stmt result { Kind::Return, {}, {} };
-
-		result.children.push_back(std::move(inner));
-
-		return result;
-	}
-};
-
-std::vector<Stmt> make_statements(const ScriptInfo& script, const SceneInfo& scene, Span<const DisIns> slice)
+std::vector<Stmt> make_statements(const CmbInfo& script, const SceneInfo& scene, Span<const BcIns> slice)
 {
 	std::vector<Stmt> result;
 	result.reserve(slice.size());
@@ -664,7 +296,7 @@ std::vector<Stmt> make_statements(const ScriptInfo& script, const SceneInfo& sce
 			// push varname
 
 			result.push_back(Stmt::make_push(
-				Expr::make_unique_identifier(std::string(script.globalnames[ins.operand]))));
+				Expr::make_unique_identifier(std::string(script.globalNames[ins.operand]))));
 
 			break;
 
@@ -677,7 +309,7 @@ std::vector<Stmt> make_statements(const ScriptInfo& script, const SceneInfo& sce
 				back.children[0] = Expr::make_unique_unop(Expr::Kind::Deref,
 					Expr::make_unique_binop(Expr::Kind::Add,
 						Expr::make_unique_unop(Expr::Kind::Addrof,
-							Expr::make_unique_identifier(std::string(script.globalnames[ins.operand]))),
+							Expr::make_unique_identifier(std::string(script.globalNames[ins.operand]))),
 						std::move(back.children[0])));
 			});
 
@@ -689,7 +321,7 @@ std::vector<Stmt> make_statements(const ScriptInfo& script, const SceneInfo& sce
 
 			result.push_back(Stmt::make_push(
 				Expr::make_unique_unop(Expr::Kind::Addrof,
-					Expr::make_unique_identifier(std::string(script.globalnames[ins.operand])))));
+					Expr::make_unique_identifier(std::string(script.globalNames[ins.operand])))));
 
 			break;
 
@@ -701,7 +333,7 @@ std::vector<Stmt> make_statements(const ScriptInfo& script, const SceneInfo& sce
 			{
 				back.children[0] = Expr::make_unique_binop(Expr::Kind::Add,
 					Expr::make_unique_unop(Expr::Kind::Addrof,
-						Expr::make_unique_identifier(std::string(script.globalnames[ins.operand]))),
+						Expr::make_unique_identifier(std::string(script.globalNames[ins.operand]))),
 					std::move(back.children[0]));
 			});
 
@@ -1127,6 +759,9 @@ std::ostream& operator << (std::ostream& os, const Stmt& stmt)
 	switch (stmt.kind)
 	{
 
+	case Stmt::Kind::Invalid:
+		return os << "<invalid statement>" << std::endl;
+
 	case Stmt::Kind::Push:
 		return os << "push " << *stmt.children[0] << ";";
 
@@ -1161,111 +796,35 @@ int main(int argc, char** argv)
 
 	const auto data = soren::read_entire_file(filename.c_str());
 	const auto span = soren::Span<const soren::byte_type>(data);
+	const auto cmb = soren::decode_cmb(span, soren::GameKind::FE10);
 
-	const auto offStrings = soren::decode_int_le(span.subspan(0x24, 4));
-	const auto offEvents  = soren::decode_int_le(span.subspan(0x28, 4));
+	for (auto& gvar : cmb.globalNames)
+		std::cout << "VARIABLE " << gvar << ";" << std::endl;
 
-	// std::cout << "SOME MEM SIZE: " << std::hex << soren::decode_int_le(span.subspan(0x22, 2)) << std::endl;
-
-	soren::ScriptInfo scriptInfo;
-
-	if (offStrings > offEvents)
-		scriptInfo.strpool.assign(span.begin() + offStrings, span.end());
-	else
-		scriptInfo.strpool.assign(span.begin() + offStrings, span.begin() + offEvents);
-
-	scriptInfo.globalnames.resize(soren::decode_int_le(span.subspan(0x22, 2)));
-
-	for (unsigned i = 0; i < scriptInfo.globalnames.size(); ++i)
-	{
-		scriptInfo.globalnames[i] = [&] ()
-		{
-			std::string r("glob_");
-			r.append(std::to_string(i));
-			return r;
-		} ();
-
-		std::cout << "VARIABLE "<< scriptInfo.globalnames[i] << ";" << std::endl;
-	}
-
-	if (scriptInfo.globalnames.size() > 0)
+	if (cmb.globalNames.size() > 0)
 		std::cout << std::endl;
 
-	for (unsigned i = 0; const auto offEvent = soren::decode_int_le(span.subspan(offEvents+i*4, 4)); ++i)
+	for (auto& scene : cmb.scenes)
 	{
-		scriptInfo.scenes.emplace_back();
-		auto& scene = scriptInfo.scenes.back();
+		std::cout << "EVENT " << scene.name << "(";
 
-		const auto nameOff = soren::decode_int_le(span.subspan(offEvent+0x00, 4));
-
-		scene.idx  = i;
-		scene.argCnt = soren::decode_int_le(span.subspan(offEvent+0xD, 1));
-
-		scene.name =  [&] () -> std::string
+		for (unsigned i = 0; i < scene.argCnt; ++i)
 		{
-			if (nameOff == 0)
-			{
-				return [&] ()
-				{
-					std::string r;
-					r.append("unk_");
-					r.append(std::to_string(i));
-					return r;
-				} ();
-			}
-			else
-			{
-				return [&] ()
-				{
-					std::string r;
-
-					for (unsigned i = nameOff; span[i]; ++i)
-						r.push_back(span[i]);
-
-					return r;
-				} ();
-			}
-		} ();
-
-		scene.varnames.resize(soren::decode_int_le(span.subspan(offEvent+0x12, 2)));
-
-		for (unsigned j = 0; j < scene.varnames.size(); ++j)
-		{
-			if (j < scene.argCnt)
-				scene.varnames[j] = [&] () { std::string r("arg_"); r.append(std::to_string(j)); return r; } ();
-			else
-				scene.varnames[j] = [&] () { std::string r("var_"); r.append(std::to_string(j - scene.argCnt)); return r; } ();
-		}
-
-		scene.isGlobal = (nameOff != 0);
-
-		scriptInfo.scenes.back().kind = soren::decode_int_le(span.subspan(offEvent+0x0C, 1));
-	}
-
-	for (unsigned i = 0; const auto offEvent = soren::decode_int_le(span.subspan(offEvents+i*4, 4)); ++i)
-	{
-		std::cout << "EVENT " << scriptInfo.scenes[i].name << "(";
-
-		for (unsigned j = 0; j < scriptInfo.scenes[i].argCnt; ++j)
-		{
-			if (j != 0)
+			if (i != 0)
 				std::cout << ", ";
 
-			std::cout << scriptInfo.scenes[i].varnames[j];
+			std::cout << scene.varnames[i];
 		}
 
 		std::cout << ")";
 
-		if (scriptInfo.scenes[i].isGlobal)
+		if (scene.isGlobal)
 			std::cout << " global";
 
 		std::cout << std::endl;
-
 		std::cout << "{" << std::endl;
 
-		const auto offScript = soren::decode_int_le(span.subspan(offEvent+0x04, 4));
-		const auto script = soren::decode_script(span.subspan(offScript));
-		const auto slices = soren::slice_script(script);
+		const auto slices = soren::slice_script(scene.rawScript);
 
 		const auto labels = [&] ()
 		{
@@ -1275,7 +834,7 @@ int main(int argc, char** argv)
 			{
 				for (auto& ins : slice.second)
 				{
-					if (ins.info().isJump)
+					if (ins.is_jump() && !ins.is_jump_keep())
 						result.set(ins.operand, [&] () { std::string r("label_"); r.append(std::to_string(ins.operand)); return r; } ());
 				}
 			}
@@ -1299,7 +858,7 @@ int main(int argc, char** argv)
 			// TODO: check whether any bkn/bky jumps to another slice, because that would be bad
 			const auto fixedSlice = soren::get_bks_as_fake_logic(slice.second);
 
-			for (auto& stmt : soren::make_statements(scriptInfo, scriptInfo.scenes[i], fixedSlice))
+			for (auto& stmt : soren::make_statements(cmb, scene, fixedSlice))
 				std::cout << "  " << stmt << std::endl;
 		}
 

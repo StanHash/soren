@@ -1,5 +1,5 @@
 
-#include "por-bytecode.h"
+#include "soren-bytecode.h"
 
 #include <limits>
 
@@ -72,11 +72,11 @@ const BcOpcodeInfo gBcOpcodeInfo[BC_OPCODE_COUNT]
 	{ "call.", vardiff, 1 },
 	{ "call", vardiff, 3 },
 	{ "ret",     0, 0 },
-	{ "b",       0, 2, true },
-	{ "by",     -1, 2, true },
-	{ "bky",  vardiff, 2, true },
-	{ "bn",     -1, 2, true },
-	{ "bkn",  vardiff, 2, true },
+	{ "b",       0, 2 },
+	{ "by",     -1, 2 },
+	{ "bky",  vardiff, 2 },
+	{ "bn",     -1, 2 },
+	{ "bkn",  vardiff, 2 },
 	{ "yield",   0, 0 },
 
 	{ "unk",     0, 4 },
@@ -89,8 +89,8 @@ const BcOpcodeInfo gBcOpcodeInfo[BC_OPCODE_COUNT]
 	{ "rety",    0, 0 },
 	{ "assign", -2, 0 },
 
-	{ "fake_land", -1, 0 },
-	{ "fake_lorr", -1, 0 },
+	{ "scand",  -1, 0 }, // Short-Circuiting And
+	{ "scorr",  -1, 0 }, // Short-Circuiting Orr
 };
 
 } // namespace soren

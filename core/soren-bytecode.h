@@ -8,6 +8,12 @@
 
 namespace soren {
 
+enum class GameKind
+{
+	FE9,
+	FE10
+};
+
 enum
 {
 	BC_OPCODE_NOP      = 0x00,
@@ -111,25 +117,42 @@ struct BcOpcodeInfo
 	const char* mnemonic;
 	int stackDiff;
 	unsigned operandSize;
-	bool isJump = false;
 };
 
 extern const BcOpcodeInfo gBcOpcodeInfo[BC_OPCODE_COUNT];
 
-template<typename LocationType>
 struct BcIns
 {
 	inline const BcOpcodeInfo& info() const { return gBcOpcodeInfo[opcode]; }
 
-	template<bool IsFE10>
-	inline bool valid() const
+	inline bool valid(GameKind game) const
 	{
-		return IsFE10
+		return game == GameKind::FE10
 			? opcode < BC_OPCODE_FE10_COUNT
 			: opcode < BC_OPCODE_FE9_COUNT;
 	}
 
-	LocationType location;
+	inline bool valid_extended() const
+	{
+		return opcode < BC_OPCODE_COUNT;
+	}
+
+	inline bool is_jump() const
+	{
+		return opcode == BC_OPCODE_B || opcode == BC_OPCODE_BN || opcode == BC_OPCODE_BY || opcode == BC_OPCODE_BKN || opcode == BC_OPCODE_BKY;
+	}
+
+	inline bool is_jump_keep() const
+	{
+		return opcode == BC_OPCODE_BKN || opcode == BC_OPCODE_BKY;
+	}
+
+	inline bool is_end() const
+	{
+		return opcode == BC_OPCODE_RETURN || opcode == BC_OPCODE_RETN || opcode == BC_OPCODE_RETY;
+	}
+
+	unsigned location;
 
 	std::int32_t operand;
 	std::uint8_t opcode;
